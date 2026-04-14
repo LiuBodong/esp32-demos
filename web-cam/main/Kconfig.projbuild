@@ -1,0 +1,132 @@
+menu "App WebCam Configuration"
+
+    # 板子类型配置
+    choice APP_WEBCAM_BOARD_TYPE
+        prompt "Camera Board Type"
+        default APP_WEBCAM_BOARD_TYPE_ESP32_CAM
+        help
+            Select the hardware board. Pin definitions will be configured automatically.
+        
+        config APP_WEBCAM_BOARD_TYPE_ESP32_CAM
+            bool "ESP32-CAM (AI-Thinker)"
+        config APP_WEBCAM_BOARD_TYPE_ESP32_S3_CAM
+            bool "ESP32-S3-CAM (Freenove / Standard)"
+    endchoice
+
+    menu "Camera"
+        
+        choice APP_WEBCAM_CAMERA_SENSOR
+            prompt "Camera Sensor"
+            default APP_WEBCAM_CAMERA_SENSOR_OV3660
+            help
+                Select he camera sensor being used.
+            
+            config APP_WEBCAM_CAMERA_SENSOR_OV3660
+                bool "OV3660"
+            config APP_WEBCAM_CAMERA_SENSOR_OV5640
+                bool "OV5640"
+        endchoice
+        
+        choice APP_WEBCAM_CAMERA_FRAME_SIZE
+            prompt "Camera Frame Size"
+            default APP_WEBCAM_FRAMESIZE_VGA
+            help
+                Select the resolution of the camera stream.
+            
+            config APP_WEBCAM_FRAMESIZE_QVGA
+                bool "QVGA (320x240)"
+            config APP_WEBCAM_FRAMESIZE_VGA
+                bool "VGA (640x480)"
+            config APP_WEBCAM_FRAMESIZE_HD
+                bool "HD (1280x720)"
+            config APP_WEBCAM_FRAMESIZE_UXGA
+                bool "UXGA (1600x1200)"
+            config APP_WEBCAM_FRAMESIZE_QXGA
+                bool "QXGA (2048x1536)"
+                
+            config APP_WEBCAM_FRAMESIZE_QHD
+                bool "QHD (2560x1440)"
+                depends on APP_WEBCAM_CAMERA_SENSOR_OV5640
+                
+            config APP_WEBCAM_FRAMESIZE_5MP
+                bool "5MP (2592x1944)"
+                depends on APP_WEBCAM_CAMERA_SENSOR_OV5640
+        endchoice
+
+        config APP_WEBCAM_CAMERA_MAX_FPS
+            int "Camera Max FPS"
+            range 1 25
+            default 10
+            help 
+                Max FPS of the camera
+
+        config APP_WEBCAM_CAMERA_QUALITY
+            int "JPEG Quality"
+            range 10 63
+            default 12
+            help 
+                JPEG quality, smaller means better
+        
+        config APP_WEBCAM_CAMERA_XCLK_FREQ_MHZ
+            int "Camera XCLK Freq (mhz)"
+            range 1 40
+            default 10
+            help 
+                Camera config of "xclk_freq_hz" in mhz
+    endmenu
+
+    menu "Wifi"
+        config APP_WEBCAM_WIFI_SSID
+            string "Wifi SSID"
+            default "my_ssid"
+            help
+                The SSID (name) of the WiFi network to connect to.
+        
+        config APP_WEBCAM_WIFI_PASSWORD
+            string "Wifi Password"
+            default ""
+            help 
+                The password of the WiFi network to connect to.
+        
+        config APP_WEBCAM_WIFI_USE_STATIC_IP
+            bool "Use Static IP"
+            default y
+            help
+                If use static ip for this network
+        
+        if APP_WEBCAM_WIFI_USE_STATIC_IP
+            config APP_WEBCAM_WIFI_STATIC_IP
+                string "Static IP"
+                default "192.168.1.201"
+                help
+                    Static ip address
+            
+            config APP_WEBCAM_STATIC_GATEWAY
+                string "Gateway Address"
+                default "192.168.1.1"
+                help
+                    Static gateway
+            
+            config APP_WEBCAM_STATIC_NETMASK
+                string "Netmask"
+                default "255.255.255.0"
+                help
+                    Static Netmask
+            
+            config APP_WEBCAM_STATIC_DNS
+                string "DNS"
+                default "192.168.1.1"
+                help
+                    Static DNS
+        endif
+                    
+    endmenu
+    
+    menu "Httpd"
+        config APP_WEBCAM_HTTPD_PORT
+            int "Httpd Server Port"
+            default 80
+            help
+                Port of the httpd server
+    endmenu
+endmenu
