@@ -102,113 +102,106 @@ static void configure_sensor(sensor_t *s)
     if (!s)
         return;
 
-    /* ---- 公共基础配置 ---- */
-    s->set_brightness(s, 0); // -2 ~ 2
-    s->set_contrast(s, 0);   // -2 ~ 2
-    s->set_whitebal(s, 1);   // AWB 开启
-    s->set_awb_gain(s, 1);
-    s->set_wb_mode(s, 0);       // 0=Auto
-    s->set_exposure_ctrl(s, 1); // AEC 开启
-    s->set_gain_ctrl(s, 1);     // AGC 开启
-    s->set_hmirror(s, 0);
-    s->set_vflip(s, 0);
+    /* ---------------------------------------------------------
+       [公共基础配置] - 适用于所有传感器的基础画质底座
+       --------------------------------------------------------- */
+    // --- 画面基础 ---
+    s->set_brightness(s, 0); // 亮度调节：范围 [-2, 2]。0 为默认。
+    s->set_contrast(s, 0);   // 对比度调节：范围 [-2, 2]。0 为默认。
+    s->set_saturation(s, 0); // 饱和度调节：范围 [-2, 2]。0 为默认。
+    s->set_hmirror(s, 0);    // 水平镜像：0关闭，1开启 (常用于前置摄像头效果)
+    s->set_vflip(s, 0);      // 垂直翻转：0关闭，1开启 (根据摄像头物理安装方向决定)
 
-    /* ---- 传感器专属优化 ---- */
+    // --- 色彩与白平衡 ---
+    s->set_whitebal(s, 1); // 自动白平衡 (AWB) 开关：1开启。必须开，否则偏色。
+    s->set_awb_gain(s, 1); // 自动白平衡增益：1开启。允许算法根据色温调整 RGB 增益。
+    s->set_wb_mode(s, 0);  // 白平衡模式：0为Auto。其他数值对应Sunny/Cloudy等。
+
+    // --- 曝光与增益 (Auto) ---
+    s->set_exposure_ctrl(s, 1); // 自动曝光控制 (AEC)：1开启。让传感器根据环境亮度自动调快门。
+    s->set_aec2(s, 1);          // DSP高级自动曝光：1开启。使用数字信号处理器进行更平滑的曝光过渡。
+    s->set_gain_ctrl(s, 1);     // 自动增益控制 (AGC)：1开启。暗光下自动提高ISO。
+
+    // --- 基础画质修复 ---
+    s->set_bpc(s, 1);     // 坏点校正 (Black Pixel Correction)：1开启。硬件剔除死像素。
+    s->set_wpc(s, 1);     // 白点校正 (White Pixel Correction)：1开启。硬件剔除画面闪烁噪点。
+    s->set_raw_gma(s, 1); // 伽马校正 (Gamma)：1开启。提亮暗部细节，使色彩映射符合人眼感知。
+    s->set_lenc(s, 1);    // 镜头暗角补偿 (Lens Correction)：1开启。修复镜头边缘进光量少导致的四周发暗。
+
+    /* ---------------------------------------------------------
+       [传感器专属优化] - 根据不同芯片的物理特性扬长避短
+       --------------------------------------------------------- */
     switch (s->id.PID)
     {
-
-    /* ====== OV2640 (2MP, 常见于 ESP32-CAM) ====== */
+    /* ====== OV2640 (200万像素，ESP32-CAM最常见) ====== */
     case OV2640_PID:
-        ESP_LOGI(TAG, "Sensor: OV2640");
-        // OV2640 的 AGC 增益范围小，适当放宽天花板
-        s->set_gainceiling(s, (gainceiling_t)6); // 0~6, 最大增益
-        s->set_agc_gain(s, 0);
-        // OV2640 色彩偏暖，稍微降饱和度补偿
+        ESP_LOGI(TAG, "Sensor detected: OV2640");
+        // 【特性】进光量小，动态范围极窄，暗光极差，色彩易偏红/偏暖。
+
+        // 1. 解锁最大增益：因为底太小，暗光必须允许最高增益，否则全黑。
+        s->set_gainceiling(s, (gainceiling_t)6); // 增益上限设为最高 (6)
+        // 2. 色彩压制：稍微降低饱和度，防止在白炽灯下画面过红。
         s->set_saturation(s, -1);
-        // 低光环境自动曝光补偿
-        s->set_aec2(s, 1);        // DSP AEC 开启
-        s->set_aec_value(s, 300); // 手动曝光值 (AEC 关闭时生效)
-        // 低分辨率下开启降噪/锐化
-        s->set_raw_gma(s, 1);        // Gamma 校正
-        s->set_lenc(s, 1);           // 镜头校正
-        s->set_special_effect(s, 0); // 无特效
         break;
 
-    /* ====== OV3660 (3MP) ====== */
+    /* ====== OV3660 (300万像素) ====== */
     case OV3660_PID:
-        ESP_LOGI(TAG, "Sensor: OV3660");
-        // OV3660 有更好的动态范围，AGC 天花板适中
-        s->set_gainceiling(s, (gainceiling_t)4);
-        s->set_agc_gain(s, 5);
-        // OV3660 默认白平衡偏青，手动校正
-        s->set_wb_mode(s, 0); // Auto 模式
-        s->set_awb_gain(s, 1);
-        // 曝光控制更精细
-        s->set_aec2(s, 1);
-        s->set_aec_value(s, 400);
-        // 色彩微调
+        ESP_LOGI(TAG, "Sensor detected: OV3660");
+        // 【特性】动态范围较好，视角常较宽，但出厂默认设置极容易偏绿/偏青，画面发灰。
+
+        // 1. 增益上限适中：其感光好于2640，设为5即可，避免噪点过多。
+        s->set_gainceiling(s, (gainceiling_t)5);
+        // 2. 提升通透度：增加一点亮度和对比度，去除“发灰”感。
         s->set_brightness(s, 1);
         s->set_contrast(s, 1);
-        // OV3660 支持 BPC (坏点校正)
-        s->set_raw_gma(s, 1);
-        s->set_lenc(s, 1);
-
-        // 上下反转
+        // 3. 物理翻转：市面上大部分给ESP32设计的OV3660模组，排线是反过来的，默认必须翻转。
         s->set_vflip(s, 1);
         break;
 
-    /* ====== OV5640 (5MP, 支持 2592x1944) ====== */
+    /* ====== OV5640 (500万像素，支持自动对焦) ====== */
     case OV5640_PID:
-        ESP_LOGI(TAG, "Sensor: OV5640");
-        // OV5640 动态范围最大，AGC 天花板可以低一些
-        s->set_gainceiling(s, (gainceiling_t)3);
-        s->set_agc_gain(s, 0);
-        // 高分辨率下曝光策略：避免过曝
-        s->set_aec2(s, 1);
-        s->set_aec_value(s, 200);
-        // OV5640 色彩还原好，保持默认
-        s->set_brightness(s, 0);
-        s->set_contrast(s, 0);
-        s->set_saturation(s, 0);
-        // 高分辨率下镜头校正和 Gamma 校正尤为重要
-        s->set_raw_gma(s, 1);
-        s->set_lenc(s, 1);
-        // 高分辨率下帧率受限，开启降噪
-        s->set_denoise(s, 1);
-        // OV5640 支持 ISP 缩放，大分辨率下很有用
-        s->set_quality(s, CONFIG_APP_WEBCAM_CAMERA_QUALITY);
+        ESP_LOGI(TAG, "Sensor detected: OV5640");
+        // 【特性】像素最高，画质最好。但像素密度高导致单像素面积小，需要极佳的光照；功耗大。
+
+        // 1. 解决过暗问题 (核心调优)：
+        // - 必须放开增益天花板，允许传感器在室内大幅拉高ISO。
+        s->set_gainceiling(s, (gainceiling_t)6);
+        // - 提升自动曝光级别 (AE Level)：取值 [-2, 2]。默认0。设为1或2，强制算法让画面更亮。
+        s->set_ae_level(s, 2);
+        s->set_brightness(s, 2);
+
+        // 2. 图像质量：5MP下噪点容易被放大，开启高级降采样抗锯齿（取代不存在的set_denoise）
+        s->set_dcw(s, 1); // Downsize Center Weight 开，缩小图像时能有效平滑噪点
         break;
 
     default:
         ESP_LOGW(TAG, "Unknown sensor PID: 0x%04X, using defaults", s->id.PID);
-        s->set_gainceiling(s, (gainceiling_t)4);
-        s->set_aec2(s, 1);
-        s->set_raw_gma(s, 1);
-        s->set_lenc(s, 1);
+        s->set_gainceiling(s, (gainceiling_t)5);
         break;
     }
 
-    /* ---- 高分辨率场景的公共调优 ---- */
-    framesize_t fs = get_frame_size();
-    if (fs >= FRAMESIZE_UXGA)
-    {
-        // 大分辨率：优先画质，帧率会自然降低
-        s->set_quality(s, CONFIG_APP_WEBCAM_CAMERA_QUALITY);
-        // 可选：强制降噪
-        s->set_denoise(s, 1);
-    }
-    else
-    {
-        // 小分辨率：优先帧率，适当放宽画质
-        s->set_quality(s, CONFIG_APP_WEBCAM_CAMERA_QUALITY);
-        s->set_denoise(s, 0); // 小分辨率关闭降噪以提速
-    }
+    /* ---------------------------------------------------------
+       [分辨率自适应调优]
+       --------------------------------------------------------- */
+    framesize_t fs = s->status.framesize; // 获取当前设定的分辨率
 
-    /* ---- 低光增强（所有传感器通用） ---- */
-    // 如果检测到环境较暗，可动态调用以下组合:
-    // s->set_agc_gain(s, 15);        // 拉高 AGC
-    // s->set_gainceiling(s, (gainceiling_t)6);  // 解锁增益天花板
-    // s->set_aec2(s, 1);             // 确保 DSP AEC 开启
+    // CONFIG_APP_WEBCAM_CAMERA_QUALITY: ESP32中 JPEG 质量设置 (0-63)。
+    // 【注意】数值越小，压缩率越低，画质越好，但文件越大，帧率越低！
+    int base_quality = CONFIG_APP_WEBCAM_CAMERA_QUALITY;
+
+    if (fs >= FRAMESIZE_UXGA) // 大于 1600x1200
+    {
+        // 高分辨率场景：由于SPI总线带宽限制，帧率本来就只有几帧，不如索性拉满画质
+        s->set_quality(s, base_quality); // 保持高画质
+        s->set_dcw(s, 1);                // 开启降采样中心权重算法，提升画面细腻度
+    }
+    else // 小于 UXGA (如 VGA 640x480, CIF 等)
+    {
+        // 低分辨率场景：通常用于视频流推流，优先保证帧率 (FPS)
+        // 适当增大 quality 数值(如+4)，牺牲一点画质来减小JPEG体积，提升网络传输速度
+        s->set_quality(s, base_quality + 4);
+        s->set_dcw(s, 0); // 关闭 DCW，减轻 ISP (图像处理单元) 负担，提升处理速度
+    }
 }
 
 esp_err_t app_camera_init(void)
