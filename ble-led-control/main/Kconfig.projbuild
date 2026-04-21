@@ -1,0 +1,9 @@
+menu "App LED BT Controller Configuration"
+
+    config APP_LED_BT_CONTROLLER_BT_NAME
+        string "Bluetooth Device Name"
+        default "ESP32_BT_LED_CTRL"
+        help
+            The Bluetooth device name that will be advertised by the ESP32.
+
+endmenu
