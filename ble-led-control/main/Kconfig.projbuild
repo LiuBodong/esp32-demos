@@ -6,4 +6,30 @@ menu "App LED BT Controller Configuration"
         help
             The Bluetooth device name that will be advertised by the ESP32.
 
+    menu "LED Config"
+
+        config APP_LED_BT_CONTROLLER_LED_PIN
+            int "LED GPIO Pin Number"
+            default 8
+            help
+                GPIO pin number connected to the LED.
+                Super Mini built-in LED is usually GPIO 8.
+
+        choice
+            prompt "LED Active Level"
+            default APP_LED_BT_CONTROLLER_LED_ACTIVE_LOW
+            help
+                Determines what voltage level turns the LED on.
+                Super Mini built-in LED is active low (low = on).
+
+            config APP_LED_BT_CONTROLLER_LED_ACTIVE_LOW
+                bool "Active Low (low voltage = LED on)"
+
+            config APP_LED_BT_CONTROLLER_LED_ACTIVE_HIGH
+                bool "Active High (high voltage = LED on)"
+
+        endchoice
+
+    endmenu
+
 endmenu
