@@ -1,14 +1,18 @@
 /**
- * ESP32 BLE LED 控制器
+ * ESP32 BLE LED 控制器（增强版 - 支持呼吸与闪烁双模式）
  *
  * 功能：
- *   - 手机通过 BLE 连接后，发送 '1' 开启 LED 闪烁，发送 '0' 关闭
+ *   - 手机通过 BLE 连接后，发送 '1' 开启 LED 效果，发送 '0' 关闭
+ *   - 发送 'R' 切换到呼吸模式（PWM 渐变）
+ *   - 发送 'S' 切换到闪烁模式（固定频率开关）
+ *   - 发送 'F' 查询当前模式（通过 Notify 返回）
  *   - ESP32 每 3 秒通过 Notify 向手机推送计数数据
  *   - 断开连接后自动重新广播
  *
  * 技术栈：
  *   - ESP-IDF + NimBLE（轻量级 BLE 协议栈）
- *   - FreeRTOS 多任务（LED 闪烁任务 + BLE TX 任务）
+ *   - LEDC（PWM 控制器）实现呼吸灯
+ *   - FreeRTOS 多任务（LED 效果任务 + BLE TX 任务）
  */
 
 #include <stdlib.h>
@@ -26,8 +30,9 @@
 #include "services/gap/ble_svc_gap.h"    // GAP 服务（广播、连接管理）
 #include "services/gatt/ble_svc_gatt.h"  // GATT 服务（属性表管理）
 
-// ======= GPIO =======
+// ======= GPIO 与 PWM =======
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 
 // ======= Kconfig 配置 =======
 #include "sdkconfig.h"
@@ -55,6 +60,23 @@ static const char *DEVICE_NAME = CONFIG_APP_LED_BT_CONTROLLER_BT_NAME;
 #define LED_OFF_LEVEL 0 // 低电平熄灭
 #endif
 
+// LED 模式枚举（新增）
+typedef enum {
+    LED_MODE_BREATH,  // 呼吸模式（PWM 渐变）
+    LED_MODE_BLINK    // 闪烁模式（开关切换）
+} led_mode_t;
+
+// 当前 LED 模式（初始值从 Kconfig 读取，新选项）
+#ifdef CONFIG_APP_LED_BT_CONTROLLER_DEFAULT_MODE_BREATH
+static led_mode_t current_mode = LED_MODE_BREATH;
+#else
+static led_mode_t current_mode = LED_MODE_BLINK;
+#endif
+
+// LED 效果开关标志（volatile 表示可能被多个任务/中断访问，编译器不要优化它）
+// 0 = 关闭效果，1 = 开启效果
+static volatile int led_effect_enabled = 0;
+
 // BLE 连接句柄，初始为"无连接"状态
 // 连接成功后会被赋值，断开后重置，用来判断是否可以发送 Notify
 static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -66,9 +88,14 @@ static uint8_t own_addr_type;
 // NimBLE 给每个特征分配一个数字句柄，发送 Notify 时需要用这个句柄来指定发给哪个特征
 static uint16_t tx_char_val_handle;
 
-// LED 闪烁状态标志（volatile 表示可能被多个任务/中断访问，编译器不要优化它）
-// 0 = 不闪烁，1 = 闪烁
-static volatile int led_blink_status = 0;
+// =====================
+//  PWM 相关常量（新增）
+// =====================
+#define LEDC_TIMER      LEDC_TIMER_0        // 使用定时器 0
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE // 低速模式（ESP32-C3 只有低速）
+#define LEDC_CHANNEL    LEDC_CHANNEL_0      // 使用通道 0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT   // 13 位分辨率，范围 0~8191
+#define LEDC_FREQ       5000                // 频率 5kHz，人眼完全看不出闪烁
 
 // =====================
 //  128-bit UUID 定义
@@ -113,8 +140,10 @@ static const ble_uuid128_t gatt_svr_chr_tx_uuid = BLE_UUID128_INIT(
 static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *ctxt, void *arg);
 static void ble_app_advertise(void);
-static void blink_led(void *pvParameter);
-static void stop_blink_led(void);
+static void led_effect_task(void *pvParameter);
+static void led_set_duty(uint32_t duty);
+static void led_set_raw(bool on);
+static void stop_led_effect(void);
 
 // =====================
 //  GATT 服务表定义
@@ -161,7 +190,127 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
 };
 
 // =====================
-//  GATT 读写回调函数
+//  LED 底层控制函数（新增 / 增强）
+// =====================
+
+/**
+ * 设置 PWM 占空比（用于呼吸模式）
+ * @param duty 占空比值，范围 0 ~ 8191（13 位分辨率）
+ *
+ * 为什么单独写这个函数？
+ * 因为 LED 可能有 Active Low / Active High 的区别，
+ * 这里统一把 "duty 越大 = 越亮" 的逻辑抽象出来，
+ * 内部根据配置反转电平。
+ */
+static void led_set_duty(uint32_t duty)
+{
+    // 如果 LED 是低电平有效，我们需要反转占空比的意义
+    // 例如 duty=8191（最大亮度） -> 对于 Active Low，应该输出低电平占空比最大
+    #ifdef CONFIG_APP_LED_BT_CONTROLLER_LED_ACTIVE_LOW
+        duty = 8191 - duty;
+    #endif
+    // 设置 PWM 占空比
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, duty);
+    // 必须调用 update 才能让设置立即生效
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+}
+
+/**
+ * 设置 LED 原始开关状态（用于闪烁模式）
+ * @param on true = 点亮，false = 熄灭
+ *
+ * 【重大修复说明！！】
+ * 这个函数原本是使用 gpio_set_level() 控制电平。
+ * 但是！因为我们在 app_main 里把这个引脚交给了 PWM (LEDC) 管理，
+ * 普通的 GPIO 控制对它就失效了！(这就是你切换闪烁模式没反应的罪魁祸首)。
+ *
+ * 现在的完美解法：复用 PWM 控制逻辑！
+ * - on=true 时，直接让占空比为 8191 (最大)，等同于常亮！
+ * - on=false 时，直接让占空比为 0 (最小)，等同于常灭！
+ */
+static void led_set_raw(bool on)
+{
+    // 修复冲突：复用上面写好的 led_set_duty 函数
+    led_set_duty(on ? 8191 : 0);
+}
+
+/**
+ * 停止 LED 效果并确保 LED 彻底关闭
+ *
+ * 这个函数可以从中断或别的任务调用
+ * 因为 led_effect_enabled 是 volatile 的，读写是原子的
+ */
+static void stop_led_effect(void)
+{
+    led_effect_enabled = 0; // 告诉 led_effect_task 任务停止效果
+    led_set_raw(false);     // 直接熄灭 LED（无论当前在什么模式，底层现在都会把 PWM 设为 0）
+}
+
+// =====================
+//  LED 效果任务（FreeRTOS 任务）—— 大幅增强版
+// =====================
+//
+// 这是一个独立的 FreeRTOS 任务，一直在后台运行
+// 它检查 led_effect_enabled 标志和 current_mode 来决定执行哪种动画
+
+static void led_effect_task(void *pvParameter)
+{
+    // ---- 呼吸模式相关变量 ----
+    int duty = 0;               // 当前 PWM 占空比，范围 0~8191
+    int step = 50;              // 每次变化的步长，步长越大呼吸越快
+    bool increasing = true;     // 当前是渐亮还是渐暗
+
+    // ---- 闪烁模式相关变量 ----
+    bool blink_state = false;   // LED 当前开关状态
+
+    // 从 Kconfig 读取呼吸速度（步进延时）和闪烁间隔
+    const int breath_delay = CONFIG_APP_LED_BT_CONTROLLER_BREATH_SPEED_MS;
+    const int blink_interval = CONFIG_APP_LED_BT_CONTROLLER_BLINK_INTERVAL_MS;
+
+    while (1) // 任务永远循环
+    {
+        // 如果效果被禁用，就保持熄灭并等待
+        if (!led_effect_enabled) {
+            // 确保 LED 是熄灭的（既然底层都修复成统一复用 PWM 了，这里可以直接调 led_set_raw）
+            led_set_raw(false);
+            // 空闲时延迟 100ms，减少 CPU 占用
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue; // 跳过后面的效果逻辑
+        }
+
+        // ===== 效果已启用，根据当前模式执行动画 =====
+        if (current_mode == LED_MODE_BREATH) {
+            // ----- 呼吸模式：PWM 渐变 -----
+            // 设置当前占空比
+            led_set_duty(duty);
+
+            // 更新占空比，实现渐亮渐暗
+            if (increasing) {
+                duty += step;
+                if (duty >= 8191) {     // 达到最大亮度
+                    duty = 8191;
+                    increasing = false; // 改为渐暗
+                }
+            } else {
+                duty -= step;
+                if (duty <= 0) {        // 达到最小亮度（熄灭）
+                    duty = 0;
+                    increasing = true;  // 改为渐亮
+                }
+            }
+            // 延时，控制呼吸速度
+            vTaskDelay(pdMS_TO_TICKS(breath_delay));
+        } else {
+            // ----- 闪烁模式：开关切换 -----
+            blink_state = !blink_state;   // 翻转状态
+            led_set_raw(blink_state);     // 应用到 GPIO（此时底层已修复，正常闪烁）
+            vTaskDelay(pdMS_TO_TICKS(blink_interval));
+        }
+    }
+}
+
+// =====================
+//  GATT 读写回调函数（增强版，支持新指令）
 // =====================
 //
 // 当手机读或写某个特征时，NimBLE 会调用这个函数
@@ -179,22 +328,58 @@ static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
         {
             // ctxt->om 是 NimBLE 的内存块结构（os_mbuf）
             // om_data 指向实际数据，om_len 是数据长度
-            if (ctxt->om->om_data[0] == '1' || ctxt->om->om_data[0] == 1)
-            {
-                // 收到 '1'（字符）或 0x01（字节），开启 LED 闪烁
-                ESP_LOGI(TAG, "收到指令: 开启 LED 闪烁");
-                led_blink_status = 1;
-            }
-            else if (ctxt->om->om_data[0] == '0' || ctxt->om->om_data[0] == 0)
-            {
-                // 收到 '0'（字符）或 0x00（字节），关闭 LED 闪烁
-                ESP_LOGI(TAG, "收到指令: 关闭 LED 闪烁");
-                stop_blink_led();
-            }
-            else
-            {
-                // 其他数据，打印十六进制方便调试
-                ESP_LOGW(TAG, "收到未知指令: 0x%02X", ctxt->om->om_data[0]);
+            uint8_t cmd = ctxt->om->om_data[0];
+
+            // 解析指令（新增了 R、S、F 指令）
+            switch (cmd) {
+                case '1':
+                case 0x01:
+                    // 收到 '1'（字符）或 0x01（字节），开启 LED 效果
+                    ESP_LOGI(TAG, "收到指令: 开启 LED 效果");
+                    led_effect_enabled = 1;
+                    break;
+
+                case '0':
+                case 0x00:
+                    // 收到 '0'（字符）或 0x00（字节），关闭 LED 效果
+                    ESP_LOGI(TAG, "收到指令: 关闭 LED 效果");
+                    stop_led_effect();
+                    break;
+
+                case 'R':
+                case 'r':
+                    // 切换到呼吸模式
+                    ESP_LOGI(TAG, "收到指令: 切换到呼吸模式");
+                    current_mode = LED_MODE_BREATH;
+                    // 如果当前效果是开启的，模式切换后立刻生效
+                    break;
+
+                case 'S':
+                case 's':
+                    // 切换到闪烁模式
+                    ESP_LOGI(TAG, "收到指令: 切换到闪烁模式");
+                    current_mode = LED_MODE_BLINK;
+                    break;
+
+                case 'F':
+                case 'f':
+                    // 查询当前模式，通过 Notify 返回
+                    ESP_LOGI(TAG, "收到指令: 查询当前模式");
+                    if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+                        const char *mode_str = (current_mode == LED_MODE_BREATH) ?
+                                               "Mode: Breath" : "Mode: Blink";
+                        // 把字符串打包成 os_mbuf 发送
+                        struct os_mbuf *om = ble_hs_mbuf_from_flat(mode_str, strlen(mode_str));
+                        if (om) {
+                            ble_gatts_notify_custom(conn_handle, tx_char_val_handle, om);
+                        }
+                    }
+                    break;
+
+                default:
+                    // 其他数据，打印十六进制方便调试
+                    ESP_LOGW(TAG, "收到未知指令: 0x%02X", cmd);
+                    break;
             }
         }
         return 0; // 返回 0 表示处理成功
@@ -202,7 +387,8 @@ static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
     // ---- 读取操作（手机读取 ESP32 的数据）----
     case BLE_GATT_ACCESS_OP_READ_CHR:
     {
-        const char *resp = "ESP32 Ready";
+        // 返回一段提示信息，告诉手机支持哪些指令
+        const char *resp = "ESP32 Ready (1=on,0=off,R=Breath,S=Blink,F=Query)";
         // os_mbuf_append 把数据追加到响应缓冲区
         int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -212,71 +398,6 @@ static int gatt_svr_chr_access(uint16_t conn_handle, uint16_t attr_handle,
         // 未知操作，返回错误
         return BLE_ATT_ERR_UNLIKELY;
     }
-}
-
-// =====================
-//  LED 控制辅助函数
-// =====================
-
-/**
- * 设置 LED 状态
- * @param on: true = LED 亮, false = LED 灭
- *
- * 这个函数封装了电平转换逻辑：
- * - 如果配置了 Active Low，on=true 时写低电平
- * - 如果配置了 Active High，on=true 时写高电平
- */
-static inline void led_set(bool on)
-{
-    gpio_set_level(LED_PIN, on ? LED_ON_LEVEL : LED_OFF_LEVEL);
-}
-
-// =====================
-//  LED 闪烁任务（FreeRTOS 任务）
-// =====================
-//
-// 这是一个独立的 FreeRTOS 任务，一直在后台运行
-// 它检查 led_blink_status 标志来决定是否闪烁
-
-static void blink_led(void *pvParameter)
-{
-    bool led_on = false; // 记录 LED 当前是否亮着
-
-    while (1) // 任务永远循环
-    {
-        if (led_blink_status == 0)
-        {
-            // 不需要闪烁
-            if (led_on)
-            {
-                // 但 LED 还亮着，先关掉
-                led_set(false);
-                led_on = false;
-            }
-            // 空闲时延迟 100ms，减少 CPU 占用
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue; // 跳过后面的闪烁逻辑
-        }
-
-        // 需要闪烁：切换 LED 状态
-        led_on = !led_on;
-        led_set(led_on);
-
-        // 闪烁间隔 500ms（亮 500ms + 灭 500ms = 1秒闪一次）
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-
-/**
- * 停止 LED 闪烁并确保 LED 关闭
- *
- * 这个函数可以从中断或别的任务调用
- * 因为 led_blink_status 是 volatile 的，读写是原子的
- */
-static void stop_blink_led(void)
-{
-    led_blink_status = 0; // 告诉 blink_led 任务停止闪烁
-    led_set(false);       // 立刻关灯
 }
 
 // =====================
@@ -332,7 +453,7 @@ static void tx_task(void *pvParameter)
 //  GAP 事件回调
 // =====================
 //
-// GAP（Generic Access Profile）负责广播、连接、配对等
+// GAP（Generic Access Profile）负责广播、连接、配颠等
 // 当这些事件发生时，NimBLE 会调用这个函数
 
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
@@ -492,24 +613,47 @@ static esp_err_t app_nvs_flash_init(void)
 void app_main(void)
 {
     // =========================================
-    //  第一步：初始化 GPIO（必须最先做）
+    //  第一步：初始化 LEDC PWM 硬件
     // =========================================
     // 为什么最先做？
-    // 因为 ESP32 上电时 GPIO 默认是低电平
-    // 如果 LED 是 Active Low，上电瞬间 LED 会闪一下
-    // 我们先配置 GPIO 并拉到熄灭电平，避免这个闪烁
+    // 因为 ESP32 上电时引脚状态不可控，我们尽早将它配置好，避免乱闪。
+    //
+    // 【重要修复】：把之前的常规 GPIO 配置(gpio_config)删掉了！
+    // 既然要跑 PWM 效果，就必须完全把它交给 LEDC 控制器。
+    // 一旦给它上了 PWM 的“紧箍咒”，普通 GPIO 逻辑就彻底失效，所以我们直接在这里初始化它，
+    // 以后的所有动作（包括常亮、常灭），统统通过调 PWM 占空比来解决！
 
-    gpio_reset_pin(LED_PIN); // 重置引脚到默认状态
-
-    gpio_config_t gpio_cfg = {
-        .pin_bit_mask = (1ULL << LED_PIN),     // 要配置的引脚（用位掩码表示）
-        .mode = GPIO_MODE_OUTPUT,              // 输出模式（我们要控制 LED）
-        .pull_up_en = GPIO_PULLUP_DISABLE,     // 禁用内部上拉电阻
-        .pull_down_en = GPIO_PULLDOWN_DISABLE, // 禁用内部下拉电阻
-        .intr_type = GPIO_INTR_DISABLE,        // 禁用中断（LED 不需要中断）
+    // 1. 配置 PWM 定时器
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode      = LEDC_MODE,           // 低速模式
+        .timer_num       = LEDC_TIMER,          // 定时器编号 0
+        .duty_resolution = LEDC_DUTY_RES,       // 13 位分辨率（0~8191）
+        .freq_hz         = LEDC_FREQ,           // 5kHz，人眼无闪烁
+        .clk_cfg         = LEDC_AUTO_CLK        // 自动选择时钟源
     };
-    gpio_config(&gpio_cfg); // 应用配置
-    led_set(false);         // 确保 LED 初始状态为关闭
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    // 2. 配置 PWM 通道（将定时器输出绑定到指定 GPIO）
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode = LEDC_MODE,                // 必须与定时器一致
+        .channel    = LEDC_CHANNEL,             // 通道 0
+        .timer_sel  = LEDC_TIMER,               // 使用上面配置的定时器 0
+        .intr_type  = LEDC_INTR_DISABLE,        // 不使用中断
+        .gpio_num   = LED_PIN,                  // 绑定到 LED 引脚
+        
+        // 关键修复点：为了防止单片机刚上电时灯乱闪一下，我们在这里给个初始熄灭的占空比
+        #ifdef CONFIG_APP_LED_BT_CONTROLLER_LED_ACTIVE_LOW
+        .duty       = 8191,                     // 低电平亮，所以给它最大占空比(高电平)让它先灭着
+        #else
+        .duty       = 0,                        // 高电平亮，给它 0 占空比(低电平)让它灭着
+        #endif
+        
+        .hpoint     = 0                         // 不使用相位偏移
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+
+    // 确保软状态也是关闭的（底层自动会处理好 PWM）
+    led_set_raw(false); 
 
     // =========================================
     //  第二步：初始化 BLE
@@ -543,22 +687,26 @@ void app_main(void)
     //    这个任务会自动处理连接、读写、Notify 等所有 BLE 事件
     nimble_port_freertos_init(ble_host_task);
 
-    // 3b. 启动 LED 闪烁任务
+    // 3b. 启动 LED 效果任务（增强版，支持呼吸与闪烁）
     //    参数说明：
-    //    - blink_led: 任务函数
-    //    - "blink_led": 任务名称（调试时可以看到）
+    //    - led_effect_task: 任务函数
+    //    - "led_effect": 任务名称（调试时可以看到）
     //    - 2048: 栈大小（单位：字）
     //    - NULL: 传递给任务的参数
     //    - 5: 任务优先级（数字越大优先级越高）
     //    - NULL: 任务句柄（不需要获取）
-    xTaskCreate(blink_led, "blink_led", 2048, NULL, 5, NULL);
+    xTaskCreate(led_effect_task, "led_effect", 2048, NULL, 5, NULL);
 
     // 3c. 启动 TX 定时 Notify 任务
     xTaskCreate(tx_task, "tx_task", 2048, NULL, 5, NULL);
 
+    // 打印初始化完成信息
+    ESP_LOGI(TAG, "系统初始化完成。默认模式: %s",
+             current_mode == LED_MODE_BREATH ? "呼吸" : "闪烁");
+
     // app_main 到这里就结束了
     // 但上面启动的 3 个任务会在后台一直运行
-    // - ble_host_task:  处理 BLE 事件
-    // - blink_led:      控制 LED 闪烁
-    // - tx_task:        定时发送 Notify
+    // - ble_host_task:   处理 BLE 事件
+    // - led_effect_task: 控制 LED 呼吸/闪烁效果
+    // - tx_task:         定时发送 Notify
 }

@@ -30,6 +30,35 @@ menu "App LED BT Controller Configuration"
 
         endchoice
 
+        choice
+            prompt "Default LED Mode"
+            default APP_LED_BT_CONTROLLER_DEFAULT_MODE_BREATH
+            help
+                Select the initial LED effect mode after power on.
+
+            config APP_LED_BT_CONTROLLER_DEFAULT_MODE_BREATH
+                bool "Breath Mode (PWM fading)"
+
+            config APP_LED_BT_CONTROLLER_DEFAULT_MODE_BLINK
+                bool "Blink Mode (on/off toggle)"
+
+        endchoice
+        
+        config APP_LED_BT_CONTROLLER_BREATH_SPEED_MS
+            int "Breath Mode Step Delay (ms)"
+            default 10
+            range 1 50
+            help
+                Delay between PWM duty changes in breath mode.
+                Smaller value = faster breathing.
+
+        config APP_LED_BT_CONTROLLER_BLINK_INTERVAL_MS
+            int "Blink Mode Interval (ms)"
+            default 500
+            range 100 2000
+            help
+                Time between LED state toggles in blink mode.
+
     endmenu
 
 endmenu
