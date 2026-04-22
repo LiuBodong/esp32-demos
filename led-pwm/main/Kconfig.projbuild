@@ -1,19 +1,36 @@
 menu "App LED PWM Configuration"
 
     menu "GPIO Configuration"
+        help
+            Configure the physical connection of the LED to the ESP32 chip.
 
         config APP_LED_PWM_GPIO_PIN
             int "GPIO Pin Number"
             range 1 100
             default 8
             help 
-                The GPIO pin number
+                The GPIO pin number that the LED is connected to.
+                
+                Important:
+                - This pin will be configured as an output for the PWM signal.
+                - Ensure the chosen pin is not used by any other peripheral
+                  (e.g., UART, SPI, I2C) and is capable of PWM output.
+                - On ESP32, pins 34-39 are input-only and cannot be used here.
 
         choice
             prompt "LED Active Level"
             default APP_LED_PWM_GPIO_ACTIVE_HIGH
             help
-                Determines what voltage level turns the LED on.
+                Determines what voltage level on the GPIO pin turns the LED on.
+                
+                This setting depends on your LED wiring:
+                - If the LED's anode (long leg) is connected to the GPIO and
+                  cathode (short leg) to GND, choose "Active High".
+                - If the LED's cathode is connected to the GPIO and anode to VCC
+                  (3.3V or 5V), choose "Active Low".
+                
+                The code will internally adjust the PWM duty cycle so that the
+                brightness behavior is consistent regardless of your wiring.
 
             config APP_LED_PWM_GPIO_ACTIVE_LOW
                 bool "Active Low (low voltage = LED on)"
@@ -25,40 +42,130 @@ menu "App LED PWM Configuration"
     endmenu
 
     menu "LEDC Configuration"
+        help
+            Configure the LEDC (LED PWM Controller) peripheral. The LEDC module
+            generates the PWM signal that controls LED brightness.
 
         config APP_LED_PWM_LEDC_TIMER
-            int "LEDC Timer No, 0-3"
+            int "LEDC Timer No. (0-3)"
             range 0 3
             default 0
             help 
-                The NO of the timer to use
-        
+                Select which LEDC hardware timer to use. The ESP32 has 4 timers
+                (0 to 3). Each timer can drive multiple channels at the same
+                frequency but with independent duty cycles.
+                
+                If you plan to use other PWM outputs in your project, choose a
+                timer that is not already in use.
+
         config APP_LED_PWM_LEDC_CHANNEL
-            int "LEDC Channel No. 0-7"
+            int "LEDC Channel No. (0-7)"
             range 0 7
             default 0
             help 
-                The NO of the channel to use
-        
-        config APP_LED_PWM_LEDC_DUTY_RES
-            int "LEDC PWM Resolution. 1-15"
-            range 1 15
-            default 6
-            help 
-                The resolution of PWM，Real value = 2 ^ n
-                Default value is 6: 2 ^ 6 = 256
-        
+                Select which LEDC channel to use. The ESP32 provides 8 channels
+                (0-7) that can be bound to any timer. The channel determines
+                which GPIO will output the PWM signal (set separately).
+                
+                Again, avoid channels already used by other parts of your code.
+
         config APP_LED_PWM_LEDC_PWM_FREQUENCY
-            int "LEDC PWM Frequency"
+            int "PWM Frequency (Hz)"
             default 5000
             help 
-                The frequency of PWM
+                The frequency of the PWM signal in Hertz.
+                
+                For LED brightness control, a frequency above ~100 Hz is
+                recommended to avoid visible flicker. Common values are:
+                - 500 Hz   : Very stable, works everywhere.
+                - 5000 Hz  : Smooth dimming, quiet (avoids audible noise).
+                - 20000 Hz : High frequency, often used with camera.
+                
+                Note: The achievable frequency depends on the duty resolution
+                (see resolution setting below). If you request a frequency that
+                is too high for the chosen resolution, initialization will fail.
+
+        # ========== 分辨率设置方式选择 ==========
+        choice
+            prompt "Duty Resolution Setting Mode"
+            default APP_LED_PWM_DUTY_RES_AUTO
+            help
+                Choose how the duty resolution (number of discrete brightness
+                steps) is determined.
+                
+                Duty resolution defines the granularity of brightness control.
+                For example, 8-bit resolution gives 256 brightness levels,
+                13-bit gives 8192 levels.
+                
+                Higher resolution gives smoother fading but reduces the maximum
+                possible PWM frequency because the internal counter takes more
+                clock cycles to complete one PWM period.
+                
+                Relationship formula:
+                    Max Frequency = Source Clock (usually 80 MHz) / (2^Resolution)
+                
+                Two modes are available:
+                
+                [Auto Mode]
+                The driver automatically selects the highest resolution that can
+                still achieve your configured PWM frequency. This is the safest
+                option and recommended for beginners.
+                
+                [Manual Mode]
+                You specify the exact resolution in bits. This gives you full
+                control, but you must ensure that the combination of frequency
+                and resolution is valid. The code will check this and report an
+                error if impossible.
+
+            config APP_LED_PWM_DUTY_RES_AUTO
+                bool "Auto (calculate from frequency)"
+
+            config APP_LED_PWM_DUTY_RES_MANUAL
+                bool "Manual (specify resolution)"
+
+        endchoice
+
+        config APP_LED_PWM_LEDC_DUTY_RESOLUTION
+            int "Duty Resolution (bits)"
+            range 1 20
+            default 13
+            depends on APP_LED_PWM_DUTY_RES_MANUAL
+            help
+                (Only available when Manual mode is selected above.)
+                
+                Set the duty resolution in bits. The number of brightness steps
+                will be 2^Resolution.
+                
+                Examples:
+                - 8 bits  : 256 steps, max frequency ~312.5 kHz (with 80 MHz clock)
+                - 10 bits : 1024 steps, max frequency ~78 kHz
+                - 12 bits : 4096 steps, max frequency ~19.5 kHz
+                - 13 bits : 8192 steps, max frequency ~9.77 kHz
+                - 14 bits : 16384 steps, max frequency ~4.88 kHz
+                - 16 bits : 65536 steps, max frequency ~1.22 kHz
+                
+                Make sure your configured PWM frequency (APP_LED_PWM_LEDC_PWM_FREQUENCY)
+                is less than or equal to the maximum frequency for the chosen
+                resolution. If not, the application will fail with an error
+                message during initialization.
+                
+                The ESP32 LEDC hardware supports up to 20 bits, but very high
+                resolutions severely limit the frequency. For LED fading, 10-14
+                bits are usually sufficient.
 
         config APP_LED_PWM_LEDC_FADE_TIME
-            int "LED Fade Time in Milliseconds"
+            int "LED Fade Time (milliseconds)"
             default 1500
             help 
-                Fade time (ms) of the led
+                Duration of a complete fade-in or fade-out transition, in
+                milliseconds.
+                
+                This time is used both for fading from off to full brightness
+                and from full brightness to off. A larger value creates a
+                slower, smoother breathing effect; a smaller value makes the
+                transition quicker.
+                
+                Typical values: 1000 - 3000 ms for a gentle breathing LED.
             
     endmenu
 
