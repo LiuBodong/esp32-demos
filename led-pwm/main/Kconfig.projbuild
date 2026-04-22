@@ -1,0 +1,65 @@
+menu "App LED PWM Configuration"
+
+    menu "GPIO Configuration"
+
+        config APP_LED_PWM_GPIO_PIN
+            int "GPIO Pin Number"
+            range 1 100
+            default 8
+            help 
+                The GPIO pin number
+
+        choice
+            prompt "LED Active Level"
+            default APP_LED_PWM_GPIO_ACTIVE_HIGH
+            help
+                Determines what voltage level turns the LED on.
+
+            config APP_LED_PWM_GPIO_ACTIVE_LOW
+                bool "Active Low (low voltage = LED on)"
+
+            config APP_LED_PWM_GPIO_ACTIVE_HIGH
+                bool "Active High (high voltage = LED on)"
+
+        endchoice
+    endmenu
+
+    menu "LEDC Configuration"
+
+        config APP_LED_PWM_LEDC_TIMER
+            int "LEDC Timer No, 0-3"
+            range 0 3
+            default 0
+            help 
+                The NO of the timer to use
+        
+        config APP_LED_PWM_LEDC_CHANNEL
+            int "LEDC Channel No. 0-7"
+            range 0 7
+            default 0
+            help 
+                The NO of the channel to use
+        
+        config APP_LED_PWM_LEDC_DUTY_RES
+            int "LEDC PWM Resolution. 1-15"
+            range 1 15
+            default 6
+            help 
+                The resolution of PWM，Real value = 2 ^ n
+                Default value is 6: 2 ^ 6 = 256
+        
+        config APP_LED_PWM_LEDC_PWM_FREQUENCY
+            int "LEDC PWM Frequency"
+            default 5000
+            help 
+                The frequency of PWM
+
+        config APP_LED_PWM_LEDC_FADE_TIME
+            int "LED Fade Time in Milliseconds"
+            default 1500
+            help 
+                Fade time (ms) of the led
+            
+    endmenu
+
+endmenu

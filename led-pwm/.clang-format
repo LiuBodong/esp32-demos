@@ -1,0 +1,5 @@
+BasedOnStyle: LLVM
+AlignConsecutiveAssignments: true  # 连续赋值时，对齐所有等号
+AlignConsecutiveDeclarations: true # 连续声明时，对齐变量名
+AlignAfterOpenBracket: Align       # 括号后对齐
+IndentWidth: 4                     # 缩进4个空格
