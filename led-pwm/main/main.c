@@ -166,7 +166,7 @@ void app_main(void) {
     app_init();
 
     while (1) {
-        ESP_LOGI(TAG, "LED 逐渐变亮 (逻辑 0%% -> 100%%)\n");
+        ESP_LOGI(TAG, "LED 逐渐变亮 (逻辑 0%% -> 100%%)");
         /**
          * ledc_set_fade_with_time()
          * 设置渐变目标占空比及渐变时长。
@@ -201,7 +201,7 @@ void app_main(void) {
          */
         vTaskDelay(pdMS_TO_TICKS(LEDC_FADE_TIME));
 
-        ESP_LOGI(TAG, "LED 逐渐变暗 (逻辑 100%% -> 0%%)\n");
+        ESP_LOGI(TAG, "LED 逐渐变暗 (逻辑 100%% -> 0%%)");
         // 设置目标占空比为熄灭状态，并启动渐变
         ledc_set_fade_with_time(LEDC_MODE, LEDC_CHANNEL, LED_DUTY_OFF_VALUE,
                                 LEDC_FADE_TIME);
