@@ -1,0 +1,62 @@
+menu "Desktop Gadget Configuration"
+
+    menu "WiFi Configuration"
+        config APP_DESKTOP_GADGET_WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                WiFi网络名称（SSID），设备将连接到此网络进行网络授时。
+
+        config APP_DESKTOP_GADGET_WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi网络密码。
+    endmenu
+
+    menu "NTP Time Sync Configuration"
+        config APP_DESKTOP_GADGET_NTP_SERVER1
+            string "Primary NTP Server"
+            default "ntp.aliyun.com"
+            help
+                主NTP授时服务器地址。
+                常用的NTP服务器：
+                - ntp.aliyun.com (阿里云，国内推荐)
+                - ntp.tencent.com (腾讯云)
+                - ntp1.aliyun.com ~ ntp7.aliyun.com (阿里云集群)
+                - pool.ntp.org (国际NTP池)
+                - time.windows.com (微软)
+                - time.apple.com (苹果)
+
+        config APP_DESKTOP_GADGET_NTP_SERVER2
+            string "Secondary NTP Server"
+            default "ntp.tencent.com"
+            help
+                备用NTP授时服务器地址，当主服务器不可用时使用。
+
+        config APP_DESKTOP_GADGET_NTP_SERVER3
+            string "Tertiary NTP Server"
+            default "pool.ntp.org"
+            help
+                第三备选NTP授时服务器地址。
+
+        config APP_DESKTOP_GADGET_NTP_GMT_OFFSET
+            int "GMT Offset (seconds)"
+            default 28800
+            help
+                相对于UTC的时区偏移量（单位：秒）。
+                28800 = UTC+8（中国标准时间 CST）
+                0 = UTC+0（格林威治标准时间 GMT）
+                -18000 = UTC-5（美国东部时间 EST）
+                3600 = UTC+1（中欧时间 CET）
+
+        config APP_DESKTOP_GADGET_NTP_DAYLIGHT_OFFSET
+            int "Daylight Saving Time Offset (seconds)"
+            default 0
+            help
+                夏令时偏移量（单位：秒）。
+                中国不使用夏令时，保持为0即可。
+                美国夏令时通常为 3600（1小时）。
+    endmenu
+
+endmenu
