@@ -119,7 +119,7 @@ esp_err_t wifi_manager_init_and_connect(void)
         .sta = {
             .ssid = WIFI_SSID,
             .password = WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_OPEN,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
 
@@ -127,8 +127,8 @@ esp_err_t wifi_manager_init_and_connect(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(8));
-    ESP_LOGI(TAG, "已降低WiFi发射功率");
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(40));
+    ESP_LOGI(TAG, "已设置WiFi发射功率为10dBm");
 
     ESP_LOGI(TAG, "WiFi初始化完成，SSID: %s, PASSWORD: %s", WIFI_SSID, WIFI_PASSWORD);
 
